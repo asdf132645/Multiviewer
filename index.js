@@ -1,104 +1,196 @@
-const { spawn, execSync } = require('child_process');  // execSync를 추가로 가져옴
 const fs = require('fs');
-const cors = require('cors');
-const express = require('express');
-const app = express();
-const os = require('os');
-const { Service } = require('node-windows');
 const path = require('path');
+const mysql = require('mysql2/promise');
+const express = require('express');
 
+// MySQL 데이터베이스 설정
+const dbConfig = {
+    host: '127.0.0.1',
+    user: 'root',
+    password: 'uimd5191!', // 실제 비밀번호로 대체
+};
 
-const ipFileIpAddressPath = `${process.env.LOCALAPPDATA}\\Programs\\UIMD\\web\\viewer\\viewerServerIP.txt`;
-// const ipFilePath = 'C:\\workspace\\test\\viewerServerIP.txt';
+// Express 애플리케이션 생성
+const app = express();
 
-const ipAddress = getIpFromFile(ipFileIpAddressPath);
-// CORS 미들웨어 설정
-app.use(cors({
-    origin: ipAddress, // 클라이언트 도메인
-    credentials: true // 자격 증명 포함 요청 허용
-}));
+// 파일 읽기 함수
+async function readFileContent(filePath) {
+    return new Promise((resolve, reject) => {
+        fs.readFile(filePath, 'utf8', (err, data) => {
+            if (err) reject(err);
+            resolve(data);
+        });
+    });
+}
 
-// IP 주소를 가져오는 함수
-function getIpFromFile(filePath) {
+// 스키마 존재 여부 확인 및 생성
+async function ensureSchemaExists(connection, schemaName) {
     try {
-        const data = fs.readFileSync(filePath, 'utf8');
-        const match = data.match(/ip=([^\s]+)/);
-        return match ? match[1] : null;
-    } catch (error) {
-        console.error('Error reading the IP file:', error.message);
-        return null;
+        const [rows] = await connection.query(
+            `SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?`,
+            [schemaName]
+        );
+
+        if (rows.length === 0) {
+            console.log(`스키마 ${schemaName} 생성 중...`);
+            await connection.query(`CREATE SCHEMA ${schemaName}`);
+        } else {
+            console.log(`스키마 ${schemaName}는 이미 존재합니다.`);
+        }
+
+        await connection.query(`USE ${schemaName}`);
+    } catch (err) {
+        console.error(`스키마 확인 중 오류 발생: ${err.message}`);
+        throw err;
     }
 }
 
-function getLocalIp() {
-    const interfaces = os.networkInterfaces();
-    for (const iface in interfaces) {
-        for (const details of interfaces[iface]) {
-            if (details.family === 'IPv4' && !details.internal) {
-                return details.address;
+// 테이블 동기화 (컬럼 삭제 및 추가)
+async function syncColumns(connection, tableName, createTableQuery) {
+    // 정규 표현식 수정: 테이블 생성 쿼리에서 컬럼 이름과 정의를 추출
+    const columnRegex = /(?:`?(\w+)`?\s+([^,]+))(?:,\s*)?/g;
+    const requiredColumns = [];
+    let match;
+
+    console.log('tableName', tableName);
+
+    // CREATE TABLE 쿼리에서 필요한 컬럼 추출
+    while ((match = columnRegex.exec(createTableQuery)) !== null) {
+        const columnName = match[1];
+        const columnDefinition = match[2]?.trim();
+
+        // 'CREATE' 키워드가 포함되지 않도록 필터링
+        if (columnName && columnName.toLowerCase() !== 'create') {
+            requiredColumns.push({ name: columnName, definition: columnDefinition });
+        }
+    }
+
+    console.log('requiredColumns', requiredColumns);
+
+    // 데이터베이스에서 현재 테이블의 실제 컬럼 가져오기
+    const [existingColumns] = await connection.query(
+        `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
+        [tableName]
+    );
+
+    console.log('existingColumns', existingColumns);
+    const existingColumnNames = existingColumns.map(row => row.COLUMN_NAME);
+
+    // id 필드 체크 및 추가
+    const idColumnExists = existingColumnNames.includes('id');
+    if (!idColumnExists) {
+        console.log(`컬럼 id 추가 중...`);
+        await connection.query(`ALTER TABLE ${tableName} ADD COLUMN id INT AUTO_INCREMENT PRIMARY KEY`);
+    }
+
+    // txt 파일에 없는 컬럼 삭제
+    for (const existingColumn of existingColumnNames) {
+        if (!requiredColumns.some(col => col.name === existingColumn)) {
+            // 현재 남은 컬럼 수 체크
+            if (existingColumnNames.length > 1) {
+                console.log(`컬럼 ${existingColumn} 삭제 중...`);
+                await connection.query(`ALTER TABLE ${tableName} DROP COLUMN ${existingColumn}`);
+            } else {
+                console.log(`컬럼 ${existingColumn}를 삭제할 수 없습니다. 최소한 하나의 컬럼은 남아 있어야 합니다.`);
             }
         }
     }
-    return null;
-}
 
+    // 필요한 컬럼 추가
+    for (const column of requiredColumns) {
+        const existingColumn = existingColumns.find(col => col.COLUMN_NAME === column.name);
 
-app.get('/close', (req, res) => {
-    const requestIp = req.query.ip;
-    const localIp = getLocalIp();
-    console.log('Local IP:', localIp);
-    console.log('Request IP:', requestIp);
-    const taskkill = spawn('cmd.exe', ['/c', 'taskkill /F /IM msedge.exe'], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true
-    });
-    taskkill.unref();
-
-    const closeNode = spawn('cmd.exe', ['/c', 'taskkill /F /IM node.exe']);
-
-    closeNode.on('error', (err) => {
-        console.error('닫기 실패:', err);
-    });
-
-    closeNode.unref();
-
-    res.send('닫기 성공');
-
-    // 현재 프로세스 종료
-    process.exit(0);
-});
-
-// 서버 설정
-// const ipFilePath = '%LocalAppData%\\Programs\\UIMD\\web\\viewer\\viewerServerIP.txt';
-
-const ipFilePath = `${process.env.LOCALAPPDATA}\\Programs\\UIMD\\web\\viewer\\viewerServerIP.txt`;
-const ipFromFile = getIpFromFile(ipFilePath);
-
-if (ipFromFile) {
-    // 이미 실행 중인 프로세스를 찾고 종료
-    try {
-        const currentServer = execSync('netstat -ano | findstr :3000');
-        const pid = currentServer.toString().match(/\d+$/);  // netstat 결과에서 PID 추출
-
-        if (pid) {
-            console.log(`기존 서버 종료 중: PID ${pid[0]}`);
-            execSync(`taskkill /PID ${pid[0]} /F`);  // PID를 이용해 서버 프로세스 강제 종료
+        if (!existingColumn) {
+            console.log(`컬럼 ${column.name} 추가 중...`);
+            await connection.query(`ALTER TABLE ${tableName} ADD COLUMN ${column.name} ${column.definition}`);
+        } else {
+            console.log(`컬럼 ${column.name} 이미 있는 항목`);
         }
-    } catch (err) {
-        console.log('종료할 서버 프로세스가 없습니다.');
     }
-
-    // 새로운 서버 시작
-    app.listen(3000, () => {
-        // Edge 브라우저 열기
-        const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-        const url = `${ipFromFile}`;
-
-        const browser = spawn(edgePath, [url]);
-        browser.unref();
-        console.log('새로운 서버가 포트 3000에서 실행 중입니다.');
-    });
-} else {
-    console.error('IP 주소를 가져올 수 없습니다.');
 }
+
+
+
+
+// 파일 경로 내 모든 파일을 처리하는 함수
+async function processAllTxtFiles(directoryPath) {
+    try {
+        // MySQL 연결
+        const connection = await mysql.createConnection(dbConfig);
+
+        // 폴더 내의 모든 .txt 파일을 읽기
+        const files = fs.readdirSync(directoryPath).filter(file => file.endsWith('.txt'));
+
+        for (let file of files) {
+            const filePath = path.join(directoryPath, file);
+            console.log(`파일 처리 중: ${filePath}`);
+
+            // 파일 내용 읽기
+            const fileContent = await readFileContent(filePath);
+
+            // 파일 내용에서 SQL 구문을 ';'로 구분하여 분할
+            const queries = fileContent.split(';').map(query => query.trim()).filter(query => query.length > 0);
+
+            let schemaName = null;
+            const tablesInFile = {};
+
+            for (let query of queries) {
+                if (query.toLowerCase().startsWith('create schema')) {
+                    // 스키마 이름 추출
+                    const schemaNameMatch = query.match(/CREATE SCHEMA (\w+)/i);
+                    schemaName = schemaNameMatch ? schemaNameMatch[1] : null;
+
+                    if (schemaName) {
+                        await ensureSchemaExists(connection, schemaName);
+                    }
+                } else if (query.toLowerCase().startsWith('create table')) {
+                    // 테이블 이름 추출
+                    const tableNameMatch = query.match(/CREATE TABLE IF NOT EXISTS (\w+)/i);
+                    const tableName = tableNameMatch ? tableNameMatch[1] : null;
+
+                    if (tableName) {
+                        // 테이블 정보 저장
+                        tablesInFile[tableName] = query;
+                    }
+                }
+            }
+
+            // 기존 테이블과 txt 파일의 테이블 동기화
+            for (let tableName in tablesInFile) {
+                // 테이블 존재 여부 확인
+                const [tableExists] = await connection.query(
+                    `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
+                    [tableName]
+                );
+
+                if (tableExists.length > 0) {
+                    // 컬럼 동기화
+                    await syncColumns(connection, tableName, tablesInFile[tableName]);
+                } else {
+                    // 테이블이 존재하지 않는 경우, 생성
+                    console.log(`테이블 ${tableName} 생성 중...`);
+                    await connection.query(tablesInFile[tableName]);
+                }
+            }
+        }
+
+        // MySQL 연결 종료
+        await connection.end();
+        console.log('모든 파일 처리 완료');
+    } catch (err) {
+        console.error(`오류 발생: ${err.message}`);
+    }
+}
+
+// Express 서버 시작
+app.listen(3009, () => {
+    console.log('서버가 3009번 포트에서 실행 중입니다.');
+
+    // 파일 경로 설정
+    const ipFileIpAddressPath = `${process.env.LOCALAPPDATA}\\Programs\\UIMD\\dbmigration`;
+
+    // txt 파일 처리 시작
+    processAllTxtFiles(ipFileIpAddressPath).catch(err => {
+        console.error(`파일 처리 중 오류 발생: ${err.message}`);
+    });
+});
