@@ -7,7 +7,7 @@ const express = require('express');
 const dbConfig = {
     host: '127.0.0.1',
     user: 'root',
-    password: 'uimd5191!', // 실제 비밀번호로 대체
+    password: 'uimd5191!',
 };
 
 // Express 애플리케이션 생성
@@ -51,13 +51,17 @@ async function syncColumns(connection, tableName, createTableQuery) {
     const columnRegex = /(?:`?(\w+)`?\s+([^,]+))(?:,\s*)?/g;
     const requiredColumns = [];
     let match;
-
-    console.log('tableName', tableName);
-
+    console.log('tableName', tableName)
     // CREATE TABLE 쿼리에서 필요한 컬럼 추출
     while ((match = columnRegex.exec(createTableQuery)) !== null) {
         const columnName = match[1];
-        const columnDefinition = match[2]?.trim();
+        let columnDefinition = match[2]?.trim();
+
+        // 컬럼 정의에서 불필요한 공백이나 줄바꿈 제거
+        columnDefinition = columnDefinition.replace(/[\r\n]+/g, '');
+
+        // 컬럼 정의 끝에 ')'가 있으면 제거
+        columnDefinition = columnDefinition.replace(/\)+$/, ')');
 
         // 'CREATE' 키워드가 포함되지 않도록 필터링
         if (columnName && columnName.toLowerCase() !== 'create') {
@@ -65,7 +69,7 @@ async function syncColumns(connection, tableName, createTableQuery) {
         }
     }
 
-    console.log('requiredColumns', requiredColumns);
+    // console.log('requiredColumns', requiredColumns);
 
     // 데이터베이스에서 현재 테이블의 실제 컬럼 가져오기
     const [existingColumns] = await connection.query(
@@ -73,30 +77,18 @@ async function syncColumns(connection, tableName, createTableQuery) {
         [tableName]
     );
 
-    console.log('existingColumns', existingColumns);
+    // console.log('existingColumns', existingColumns);
     const existingColumnNames = existingColumns.map(row => row.COLUMN_NAME);
-
-    // id 필드 체크 및 추가
-    const idColumnExists = existingColumnNames.includes('id');
-    if (!idColumnExists) {
-        console.log(`컬럼 id 추가 중...`);
-        await connection.query(`ALTER TABLE ${tableName} ADD COLUMN id INT AUTO_INCREMENT PRIMARY KEY`);
-    }
 
     // txt 파일에 없는 컬럼 삭제
     for (const existingColumn of existingColumnNames) {
-        if (!requiredColumns.some(col => col.name === existingColumn)) {
-            // 현재 남은 컬럼 수 체크
-            if (existingColumnNames.length > 1) {
-                console.log(`컬럼 ${existingColumn} 삭제 중...`);
-                await connection.query(`ALTER TABLE ${tableName} DROP COLUMN ${existingColumn}`);
-            } else {
-                console.log(`컬럼 ${existingColumn}를 삭제할 수 없습니다. 최소한 하나의 컬럼은 남아 있어야 합니다.`);
-            }
+        if (!requiredColumns.some(col => col.name === existingColumn) && existingColumn !== 'id') {
+            console.log(`컬럼 ${existingColumn} 삭제 중...`);
+            await connection.query(`ALTER TABLE ${tableName} DROP COLUMN ${existingColumn}`);
         }
     }
 
-    // 필요한 컬럼 추가
+    // txt 파일 기준으로 필요한 컬럼 추가
     for (const column of requiredColumns) {
         const existingColumn = existingColumns.find(col => col.COLUMN_NAME === column.name);
 
@@ -104,10 +96,18 @@ async function syncColumns(connection, tableName, createTableQuery) {
             console.log(`컬럼 ${column.name} 추가 중...`);
             await connection.query(`ALTER TABLE ${tableName} ADD COLUMN ${column.name} ${column.definition}`);
         } else {
-            console.log(`컬럼 ${column.name} 이미 있는 항목`);
+            console.log(`컬럼 ${column.name} 이미 있는 항목 추가 X`);
         }
     }
+
+    // id 필드 체크 및 추가
+    const idColumnExists = existingColumnNames.includes('id');
+    if (!idColumnExists) {
+        console.log(`컬럼 id 추가 중...`);
+        await connection.query(`ALTER TABLE ${tableName} ADD COLUMN id INT AUTO_INCREMENT PRIMARY KEY`);
+    }
 }
+
 
 
 
