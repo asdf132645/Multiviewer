@@ -1,24 +1,25 @@
-const { spawn, execSync } = require('child_process');  // execSync를 추가로 가져옴
+const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const cors = require('cors');
 const express = require('express');
-const app = express();
 const os = require('os');
-const { Service } = require('node-windows');
 const path = require('path');
+const net = require('net');
+const app = express();
 
-
+// IP 파일 경로 설정
 const ipFileIpAddressPath = `${process.env.LOCALAPPDATA}\\Programs\\UIMD\\web\\viewer\\viewerServerIP.txt`;
-// const ipFilePath = 'C:\\workspace\\test\\viewerServerIP.txt';
 
-const ipAddress = getIpFromFile(ipFileIpAddressPath);
 // CORS 미들웨어 설정
+const ipAddress = getIpFromFile(ipFileIpAddressPath);
 app.use(cors({
     origin: ipAddress, // 클라이언트 도메인
     credentials: true // 자격 증명 포함 요청 허용
 }));
 
-// IP 주소를 가져오는 함수
+/**
+ * IP 파일에서 IP 주소를 가져오는 함수
+ */
 function getIpFromFile(filePath) {
     try {
         const data = fs.readFileSync(filePath, 'utf8');
@@ -30,6 +31,9 @@ function getIpFromFile(filePath) {
     }
 }
 
+/**
+ * 로컬 IP 주소를 가져오는 함수
+ */
 function getLocalIp() {
     const interfaces = os.networkInterfaces();
     for (const iface in interfaces) {
@@ -42,12 +46,51 @@ function getLocalIp() {
     return null;
 }
 
+/**
+ * 포트 점유 여부를 확인하는 함수
+ */
+function isPortInUse(port, callback) {
+    const server = net.createServer();
+    server.once('error', (err) => {
+        callback(err.code === 'EADDRINUSE');
+    });
+    server.once('listening', () => {
+        server.close();
+        callback(false);
+    });
+    server.listen(port);
+}
 
+/**
+ * 특정 포트에서 실행 중인 프로세스를 종료하는 함수
+ */
+function killProcessOnPort(port) {
+    try {
+        const result = execSync(`netstat -ano | findstr :${port}`);
+        const lines = result.toString().split('\n');
+        lines.forEach(line => {
+            const match = line.trim().match(/\s(\d+)\s*$/); // PID 추출
+            if (match) {
+                const pid = match[1];
+                console.log(`기존 프로세스 종료 중: PID ${pid}`);
+                execSync(`taskkill /PID ${pid} /F`);
+            }
+        });
+    } catch (err) {
+        console.log('종료할 서버 프로세스가 없습니다.');
+    }
+}
+
+/**
+ * /close API
+ */
 app.get('/close', (req, res) => {
     const requestIp = req.query.ip;
     const localIp = getLocalIp();
     console.log('Local IP:', localIp);
     console.log('Request IP:', requestIp);
+
+    // 브라우저와 Node.js 프로세스 종료
     const taskkill = spawn('cmd.exe', ['/c', 'taskkill /F /IM msedge.exe'], {
         detached: true,
         stdio: 'ignore',
@@ -56,48 +99,36 @@ app.get('/close', (req, res) => {
     taskkill.unref();
 
     const closeNode = spawn('cmd.exe', ['/c', 'taskkill /F /IM node.exe']);
-
     closeNode.on('error', (err) => {
-        console.error('닫기 실패:', err);
+        console.error('Node.js 종료 실패:', err);
     });
-
     closeNode.unref();
 
     res.send('닫기 성공');
-
-    // 현재 프로세스 종료
     process.exit(0);
 });
 
 // 서버 설정
-// const ipFilePath = '%LocalAppData%\\Programs\\UIMD\\web\\viewer\\viewerServerIP.txt';
-
+const PORT = 3000;
 const ipFilePath = `${process.env.LOCALAPPDATA}\\Programs\\UIMD\\web\\viewer\\viewerServerIP.txt`;
 const ipFromFile = getIpFromFile(ipFilePath);
 
 if (ipFromFile) {
-    // 이미 실행 중인 프로세스를 찾고 종료
-    try {
-        const currentServer = execSync('netstat -ano | findstr :3000');
-        const pid = currentServer.toString().match(/\d+$/);  // netstat 결과에서 PID 추출
-
-        if (pid) {
-            console.log(`기존 서버 종료 중: PID ${pid[0]}`);
-            execSync(`taskkill /PID ${pid[0]} /F`);  // PID를 이용해 서버 프로세스 강제 종료
+    isPortInUse(PORT, (inUse) => {
+        if (inUse) {
+            console.log(`포트 ${PORT}는 이미 사용 중입니다. 기존 프로세스를 종료합니다.`);
+            killProcessOnPort(PORT);
         }
-    } catch (err) {
-        console.log('종료할 서버 프로세스가 없습니다.');
-    }
 
-    // 새로운 서버 시작
-    app.listen(3000, () => {
-        // Edge 브라우저 열기
-        const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-        const url = `${ipFromFile}`;
+        // 새로운 서버 시작
+        app.listen(PORT, () => {
+            console.log(`서버가 포트 ${PORT}에서 실행 중입니다.`);
 
-        const browser = spawn(edgePath, [url]);
-        browser.unref();
-        console.log('새로운 서버가 포트 3000에서 실행 중입니다.');
+            // Edge 브라우저 열기
+            const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+            const browser = spawn(edgePath, [ipFromFile]);
+            browser.unref();
+        });
     });
 } else {
     console.error('IP 주소를 가져올 수 없습니다.');

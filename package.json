@@ -17,6 +17,9 @@
     "targets": [
       "node14-win-x64"
     ],
+    "assets": [
+      "node-windows/**/*"
+    ],
     "output": "uimdwebexe"
   }
 }
