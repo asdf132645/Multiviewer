@@ -1,4 +1,4 @@
-const { spawn, execSync } = require('child_process');
+const {spawn, execSync} = require('child_process');
 const fs = require('fs');
 const cors = require('cors');
 const express = require('express');
@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const net = require('net');
 const app = express();
+const CHECK_INTERVAL = 10000; // 10초 간격으로 서버 상태 확인
 
 // IP 파일 경로 설정
 const ipFileIpAddressPath = `${process.env.LOCALAPPDATA}\\Programs\\UIMD\\web\\viewer\\viewerServerIP.txt`;
@@ -24,7 +25,9 @@ function getIpFromFile(filePath) {
     try {
         const data = fs.readFileSync(filePath, 'utf8');
         const match = data.match(/ip=([^\s]+)/);
-        return match ? match[1] : null;
+        const port = data.match(/port=([^\s]+)/);
+        const host = data.match(/host=([^\s]+)/);
+        return { ip: match[1], port: port[1], host: host[1] };
     } catch (error) {
         console.error('Error reading the IP file:', error.message);
         return null;
@@ -108,12 +111,27 @@ app.get('/close', (req, res) => {
     process.exit(0);
 });
 
+app.get('/', (req, res) => {
+    const text = `
+    <style>
+          body {
+            text-align: center;
+            margin-top: 12%;
+            }
+    </style>
+    <h1>MAIN PC를 확인 해주세요.<br> MAIN PC에 프로그램을 실행 시켜주세요.</h1>
+    <h1>"Please check the MAIN PC.<br> Please run the program on the MAIN PC."</h1>
+    `
+    res.send(text);
+});
+
+
 // 서버 설정
 const PORT = 3000;
 const ipFilePath = `${process.env.LOCALAPPDATA}\\Programs\\UIMD\\web\\viewer\\viewerServerIP.txt`;
-const ipFromFile = getIpFromFile(ipFilePath);
+const { ip, port, host } = getIpFromFile(ipFilePath);
 
-if (ipFromFile) {
+if (ip) {
     isPortInUse(PORT, (inUse) => {
         if (inUse) {
             console.log(`포트 ${PORT}는 이미 사용 중입니다. 기존 프로세스를 종료합니다.`);
@@ -121,15 +139,42 @@ if (ipFromFile) {
         }
 
         // 새로운 서버 시작
-        app.listen(PORT, () => {
+        app.listen(PORT, async () => {
             console.log(`서버가 포트 ${PORT}에서 실행 중입니다.`);
-
-            // Edge 브라우저 열기
-            const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-            const browser = spawn(edgePath, [ipFromFile]);
-            browser.unref();
+            checkTCPConnection(host, 3002);
         });
     });
 } else {
     console.error('IP 주소를 가져올 수 없습니다.');
 }
+
+// ping 명령어로 서버가 켜져 있는지 확인하는 함수
+function checkTCPConnection(host, port) {
+    const socket = new net.Socket();
+    socket.setTimeout(1000); // 타임아웃 설정 (3초)
+
+    socket.on('connect', () => {
+        const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+        const browser = spawn(edgePath, [ip+ ':'+ '8080']);
+        browser.unref();
+        socket.destroy(); // 연결 종료
+    });
+
+    socket.on('timeout', () => {
+        console.log(`서버 ${host}:${port}에 연결 타임아웃.`);
+        const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+        const browser = spawn(edgePath, ['http://localhost:3000/']);
+        browser.unref();
+        socket.destroy();
+    });
+
+    socket.on('error', (err) => {
+        const edgePath = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+        const browser = spawn(edgePath, ['http://localhost:3000/']);
+        browser.unref();
+        console.log(`서버 ${host}:${port}에 연결 실패: ${err.message}`);
+    });
+
+    socket.connect(port, host);
+}
+
